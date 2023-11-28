@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -32,7 +35,9 @@ type Configure struct {
 	Prefix          string   `yaml:"prefix"`
 	HTTPAuth        string   `yaml:"httpauth"`
 	Cert            string   `yaml:"cert"`
+	CaCert          string   `yaml:"cacert"`
 	Key             string   `yaml:"key"`
+	VerifyPeer      bool     `yaml:"verifypeer"`
 	Cors            bool     `yaml:"cors"`
 	Theme           string   `yaml:"theme"`
 	XHeaders        bool     `yaml:"xheaders"`
@@ -108,7 +113,9 @@ func parseFlags() error {
 	kingpin.Flag("port", "listen port, default 8000").IntVar(&gcfg.Port)
 	kingpin.Flag("addr", "listen address, eg 127.0.0.1:8000").Short('a').StringVar(&gcfg.Addr)
 	kingpin.Flag("cert", "tls cert.pem path").StringVar(&gcfg.Cert)
+	kingpin.Flag("cacert", "tls cacert.pem path").StringVar(&gcfg.CaCert)
 	kingpin.Flag("key", "tls key.pem path").StringVar(&gcfg.Key)
+	kingpin.Flag("verifypeer", "tls verify peer cert").BoolVar(&gcfg.VerifyPeer)
 	kingpin.Flag("auth-type", "Auth type <http|openid>").StringVar(&gcfg.Auth.Type)
 	kingpin.Flag("auth-http", "HTTP basic auth (ex: user:pass)").StringVar(&gcfg.Auth.HTTP)
 	kingpin.Flag("auth-openid", "OpenID auth identity url").StringVar(&gcfg.Auth.OpenID)
@@ -134,6 +141,11 @@ func parseFlags() error {
 		}
 		return yaml.Unmarshal(ymlData, &gcfg)
 	}
+
+	if gcfg.VerifyPeer && gcfg.CaCert == "" {
+		return errors.New("verify peer need cacert")
+	}
+
 	return nil
 }
 
@@ -243,9 +255,30 @@ func main() {
 	_, port, _ := net.SplitHostPort(gcfg.Addr)
 	log.Printf("listening on %s, local address http://%s:%s\n", strconv.Quote(gcfg.Addr), getLocalIP(), port)
 
-	srv := &http.Server{
-		Handler: mainRouter,
-		Addr:    gcfg.Addr,
+	var srv *http.Server
+	if gcfg.VerifyPeer {
+		pool := x509.NewCertPool()
+
+		caCrt, err2 := ioutil.ReadFile(gcfg.CaCert)
+		if err2 != nil {
+			fmt.Println("ReadFile err:", err2)
+			return
+		}
+		pool.AppendCertsFromPEM(caCrt)
+
+		srv = &http.Server{
+			Handler: mainRouter,
+			Addr:    gcfg.Addr,
+			TLSConfig: &tls.Config{
+				ClientCAs:  pool,
+				ClientAuth: tls.RequireAndVerifyClientCert,
+			},
+		}
+	} else {
+		srv = &http.Server{
+			Handler: mainRouter,
+			Addr:    gcfg.Addr,
+		}
 	}
 
 	var err error
